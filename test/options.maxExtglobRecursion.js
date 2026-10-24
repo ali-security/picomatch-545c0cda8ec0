@@ -1,7 +1,7 @@
 'use strict';
 
 const assert = require('assert');
-const { isMatch, makeRe } = require('..');
+const { isMatch, makeRe, parse } = require('..');
 
 describe('options.maxExtglobRecursion', () => {
   it('should literalize risky repeated extglobs by default', () => {
@@ -142,6 +142,104 @@ describe('options.maxExtglobRecursion', () => {
     assert(isMatch('+(a|aa)x', '+(a|aa)@(x)'));
     assert(!isMatch('aaax', '+(a|aa)@(x)'));
   });
+
+  describe('repeated extglobs with a star in a branch', () => {
+    // A `*` inside `+(...)` or `*(...)` (or a negation extglob, which ends in
+    // a star) nests an unbounded quantifier inside the repeat, even when the
+    // extglob has a single branch: `+(*a)` used to compile to `(?:[^/]*?a)+`,
+    // which backtracks exponentially on input like `aaa...a!`.
+    const output = (pattern, options) => parse(pattern, options).output;
+
+    it('should not repeat a single branch that contains a star', () => {
+      assert.strictEqual(output('+(*)'), '(?=.)(?:[^/]*?)');
+      assert.strictEqual(output('*(*)'), '(?=.)(?:[^/]*?)?');
+      assert.strictEqual(output('+(*a)'), '(?=.)(?:[^/]*?a)');
+      assert.strictEqual(output('*(*a)'), '(?=.)(?:[^/]*?a)?');
+      assert.strictEqual(output('+(a*)'), '(?=.)(?:a[^/]*?)');
+      assert.strictEqual(output('+(*)c'), '(?=.)(?:[^/]*?)c');
+      assert.strictEqual(output('x+(*a)y'), 'x(?:[^/]*?a)y');
+      assert.strictEqual(output('+(!(b))x'), '(?=.)(?:(?:(?!(?:b))[^/]*?))x');
+    });
+
+    it('should not repeat the star branches of a multi-branch extglob', () => {
+      assert.strictEqual(output('+(*a|b)'), '(?=.)(?:(?:b)*(?:[^/]*?a)(?:b)*|(?:b)+)');
+      assert.strictEqual(output('*(a*|b)'), '(?=.)(?:(?:b)*(?:(?:a[^/]*?)(?:b)*)?)');
+      assert.strictEqual(output('+(*.js|*.ts)'), '(?=.)(?:[^/]*?\\.js|[^/]*?\\.ts)');
+    });
+
+    it('should literalize a repeated star that cannot be rewritten safely', () => {
+      assert.strictEqual(output('+(@(*a))'), '\\+\\(@\\(\\*a\\)\\)');
+      assert.strictEqual(output('*(@(*a|b))'), '\\*\\(@\\(\\*a\\|b\\)\\)');
+      assert.strictEqual(output('+(a*|*b)'), '\\+\\(a\\*\\|\\*b\\)');
+      assert.strictEqual(output('+(*/*)'), '\\+\\(\\*/\\*\\)');
+    });
+
+    it('should preserve the meaning of repeated extglobs that contain a star', () => {
+      assert(isMatch('abc', '+(*)'));
+      assert(isMatch('abc', '*(*)'));
+      assert(isMatch('abc', '+(*)c'));
+      assert(!isMatch('abc', '+(*)x'));
+      assert(isMatch('aba', '+(*a)'));
+      assert(!isMatch('ab', '+(*a)'));
+      assert(isMatch('xa', '*(*a)'));
+      assert(isMatch('ab', '+(a*)'));
+      assert(!isMatch('ba', '+(a*)'));
+      assert(isMatch('xay', 'x+(*a)y'));
+      assert(isMatch('xaay', 'x+(*a)y'));
+      assert(!isMatch('xy', 'x+(*a)y'));
+      assert(isMatch('xy', 'x*(*a)y'));
+      assert(!isMatch('x/ay', 'x+(*a)y'));
+
+      assert(isMatch('ab', '+(*a|b)'));
+      assert(isMatch('bab', '+(*a|b)'));
+      assert(isMatch('xab', '+(*a|b)'));
+      assert(isMatch('bb', '+(*a|b)'));
+      assert(!isMatch('ax', '+(*a|b)'));
+      assert(isMatch('ax', '*(a*|b)'));
+      assert(isMatch('bax', '*(a*|b)'));
+      assert(isMatch('bb', '*(a*|b)'));
+      assert(!isMatch('xa', '*(a*|b)'));
+      assert(isMatch('a.js', '+(*.js|*.ts)'));
+      assert(isMatch('a.jsb.ts', '+(*.js|*.ts)'));
+      assert(!isMatch('a.ts.x', '+(*.js|*.ts)'));
+
+      assert(isMatch('fff', '+(!(f))'));
+      assert(!isMatch('f', '+(!(f))'));
+      assert(isMatch('ax', '+(!(b))x'));
+      assert(!isMatch('bx', '+(!(b))x'));
+
+      assert(isMatch('a/b/', '+(*/)'));
+      assert(isMatch('a/b/c', '+(*/)c'));
+      assert.strictEqual(output('+(*/)'), '(?=.)(?:[^/]*?\\/)+');
+    });
+
+    it('should not backtrack catastrophically on repeated extglobs that contain a star', () => {
+      const cases = [
+        ['+(*)', 'a'.repeat(64) + '/'],
+        ['*(*)', 'a'.repeat(64) + '/'],
+        ['+(*)x', 'a'.repeat(64)],
+        ['+(*a)', 'a'.repeat(64) + '!'],
+        ['*(*a)', 'a'.repeat(64) + '!'],
+        ['+(a*)', 'a'.repeat(64) + '/'],
+        ['+(*?a)', 'a'.repeat(64) + '!'],
+        ['+(**)x', 'a'.repeat(64)],
+        ['x+(*a)y', 'x' + 'a'.repeat(64) + '!y'],
+        ['+(!(b))x', 'a'.repeat(64)],
+        ['+(*a|b)', 'a'.repeat(64) + '!'],
+        ['*(a*|b)', 'a'.repeat(64) + '/'],
+        ['+(*.js|*.ts)', 'a.js'.repeat(32) + '!'],
+        ['+(@(*a))', 'a'.repeat(64) + '!'],
+        ['+(*/*)x', 'a/'.repeat(32)]
+      ];
+
+      for (const [pattern, input] of cases) {
+        const start = Date.now();
+        assert(!isMatch(input, pattern), `${pattern} should not match`);
+        assert(Date.now() - start < 1000, `${pattern} backtracked`);
+      }
+    });
+  });
+
   it('should disable the safeguard when maxExtglobRecursion is false', () => {
     assert(
       /\(\?:a\|aa\)\+/.test(
