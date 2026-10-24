@@ -1,10 +1,12 @@
 name: Tests
 
 on:
-  push:
-    branches:
-      - master
-  pull_request:
+  workflow_dispatch:
+    inputs:
+      test-filter:
+        description: "Optional mocha test file(s) / args to run instead of the full suite"
+        required: false
+        default: ""
 
 env:
   FORCE_COLOR: 2
@@ -17,11 +19,12 @@ jobs:
   run:
     name: Node.js ${{ matrix.node }} @ ${{ matrix.os }}
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
 
     strategy:
       fail-fast: false
       matrix:
-        node: [12, 14, 16, 18, 20, 22, 24, 25]
+        node: [12, 14, 16, 18, 20, 22, 24, 25, 26]
         os: [ubuntu-latest, windows-latest, macos-latest]
         exclude:
           - os: macos-latest
@@ -48,15 +51,22 @@ jobs:
         run: npm install
 
       - name: Run tests
-        run: npm run test:ci
+        run: |
+          if [ -n "${{ inputs.test-filter }}" ]; then
+            npx mocha --reporter dot ${{ inputs.test-filter }}
+          else
+            npm run test:ci
+          fi
+        shell: bash
 
-      - name: Upload coverage report
-        # Only upload coverage report for Ubuntu and Node.js 25 (latest version), and only if the event is not a pull request or if the pull request is from the same repository.
-        if: startsWith(matrix.os, 'ubuntu') && matrix.node == 25 && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
-        uses: actions/upload-code-coverage@v1
-        continue-on-error: true
+      - name: Pack npm tarball
+        if: startsWith(matrix.os, 'ubuntu') && matrix.node == 26
+        run: npm pack
+
+      - name: Upload npm tarball
+        if: startsWith(matrix.os, 'ubuntu') && matrix.node == 26
+        uses: actions/upload-artifact@v4
         with:
-          file: coverage/cobertura-coverage.xml
-          language: JavaScript
-          label: code-coverage/nyc
-          fail-on-error: false
+          name: picomatch-tgz
+          path: picomatch-*.tgz
+          if-no-files-found: error
